@@ -1,34 +1,17 @@
-name: docker
+name: funds-allocation
 services:
-  scheduler:
-    image: us-central1-docker.pkg.dev/project-lee-1/docker/funds-allocation-scheduler:1.8.2
+  dev:
+    image: 284409997699.dkr.ecr.us-east-1.amazonaws.com/funds-allocation
     build:
-      context: ./containers
-      dockerfile: scheduler.dockerfile
-      args:
-        JULIA_VERSION: 1.8.2
-    ports:
-      - "8888:8888"
+      context: ./
+      dockerfile: ./Dockerfile/Dockerfile
     volumes:
       - type: volume
-        source: repo
-        target: /root/github/funds-allocation
-      - type: bind
-        source: /home/ubuntu/secret
-        target: /root/secret
-    environment:
-      - NAMESPACE=julia
-  worker:
-    image: us-central1-docker.pkg.dev/project-lee-1/docker/funds-allocation-worker:1.8.2
-    build:
-      context: ./containers
-      dockerfile: worker.dockerfile
-      args:
-        JULIA_VERSION: 1.8.2
-    ports:
-      - "22:22"
+        source: funds-allocation
+        target: /root/workspaces/funds-allocation
+    tty: true
 volumes:
-  repo:
+  funds-allocation:
     driver: rclone
     driver_opts:
-      remote: "onedrive:backup/github/funds-allocation"
+      remote: "onedrive:workspaces/funds-allocation"
