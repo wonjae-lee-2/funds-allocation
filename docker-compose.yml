@@ -1,0 +1,17 @@
+name: funds-allocation
+services:
+  dev:
+    image: funds-allocation-dev:latest
+    build:
+      context: ./
+      dockerfile: ./Dockerfile/dev.Dockerfile
+    volumes:
+      - type: bind
+        source: /home/ubuntu/workspaces/funds-allocation
+        target: /home/ubuntu/funds-allocation
+    tty: true
+  prod:
+    image: 284409997699.dkr.ecr.us-east-1.amazonaws.com/funds-allocation:latest
+    build:
+      context: ./
+      dockerfile: ./Dockerfile/prod.Dockerfile

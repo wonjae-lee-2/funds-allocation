@@ -1,9 +1,81 @@
 module FundsAllocation
 
-using DataFrames, XLSX, JuMP, CPLEX, Serialization
+using DataFrames
+using Downloads
+using Gurobi
+using HTTP
+using JSON
+using JuMP
+using Serialization
+using XLSX
+
+function get_device_code()
+    url_device_code = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+    client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+    scope = "https://graph.microsoft.com/.default%20offline_access"
+    body_device_code = "client_id=$client_id&scope=$scope"
+    r_device_code = HTTP.post(url_device_code; body = body_device_code)
+    println(r_device_code)
+    open("temp/device_code", "w") do io
+        write(io, JSON.parse(String(r_device_code.body))["device_code"])
+    end
+    return
+end
+
+function get_refresh_token()
+    url_refresh_token = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+    device_code = open(f -> read(f, String), "temp/device_code")
+    body_refresh_token = "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=$client_id&device_code=$device_code"
+    open("temp/refresh_token", "w") do io
+        HTTP.post(url_refresh_token; body=body_refresh_token, response_stream=io)
+    end
+    return
+end
+
+function get_access_token()
+    url_access_token = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+    refresh_token = open(f -> JSON.parse(read(f, String))["refresh_token"], "temp/refresh_token", "r")
+    body_access_token = "client_id=$client_id&grant_type=refresh_token&refresh_token=$refresh_token"
+    open("temp/access_token", "w") do io
+        HTTP.post(url_access_token; body=body_access_token, response_stream=io)
+    end
+    return
+end
+
+function download_file(filename::String)
+    println("downloading file...")
+    get_access_token()
+    group_id = "cffa4e4a-30db-419a-9e0c-37fdf7b8ebaa"
+    url_sharepoint = "https://graph.microsoft.com/v1.0/groups/$group_id/drive/root:/BI%20Team/01.%20Fund%20Allocation/optimization/$filename?select=@microsoft.graph.downloadUrl"
+    access_token = open(f -> JSON.parse(read(f, String))["access_token"], "temp/access_token", "r")
+    headers_download = ["Authorization" => "Bearer $access_token"]
+    r_download = HTTP.get(url_sharepoint; headers=headers_download)
+    url_download = JSON.parse(String(r_download.body))["@microsoft.graph.downloadUrl"]
+    Downloads.download(url_download, "temp/$filename")
+    return
+end
+
+function upload_file(filename::String)
+    println("uploading file...")
+    group_id = "cffa4e4a-30db-419a-9e0c-37fdf7b8ebaa"
+    url_sharepoint = "https://graph.microsoft.com/v1.0/groups/$group_id/drive/root:/BI%20Team/01.%20Fund%20Allocation/optimization/$filename:/createUploadSession"
+    access_token = open(f -> JSON.parse(read(f, String))["access_token"], "temp/access_token", "r")
+    headers_session = ["Authorization" => "Bearer $access_token", "Content-Type" => "application/json"]
+    body_session = JSON.json(Dict("item" => Dict("@microsoft.graph.conflictBehavior" => "replace")))
+    r_session = HTTP.post(url_sharepoint; headers=headers_session, body=body_session)
+    url_upload = JSON.parse(String(r_session.body))["uploadUrl"]
+    content_length = filesize("temp/$filename")
+    headers_upload = ["Authorization" => "Bearer $access_token", "Content-Length" => "$content_length", "Content-Range" => "bytes 0-$(content_length - 1)/$content_length"]
+    open("temp/$filename", "r") do io
+        HTTP.put(url_upload; headers=headers_upload, body=io)
+    end
+    return
+end
 
 function read_expenses(filename::String)
-    return DataFrame(XLSX.readtable(filename, "expenses")) |>
+    return DataFrame(XLSX.readtable("temp/$filename", "expenses")) |>
         df -> transform!(df, [Symbol("Transfer Amount"), Symbol("Balance After Transfer")] .=> ByRow(x -> 0); renamecols=false) |>
         df -> transform!(df, Symbol("CC: Level") => x -> parse.(Int8, x); renamecols=false) |>
         df -> transform!(df, [Symbol("CC: Overall"), Symbol("CC: Field/ HQ/ Global/ Reserve"), Symbol("CC: Region"), Symbol("CC: Subregion"), Symbol("CC: Country"), Symbol("CF: Cost Center")] .=> x -> convert.(String, x); renamecols=false) |>
@@ -49,7 +121,7 @@ function filter_expenses(df_expenses::DataFrame)
 end
 
 function read_funds(filename::String)
-    return DataFrame(XLSX.readtable(filename, "funds")) |>
+    return DataFrame(XLSX.readtable("temp/$filename", "funds")) |>
         df -> transform!(df, [Symbol("Transfer Amount"), Symbol("Balance After Transfer")] .=> ByRow(x -> 0); renamecols=false) |>
         df -> transform!(df, Symbol("CC: Level") => x -> parse.(Int8, x); renamecols=false) |>
         df -> transform!(df, [Symbol("CC: Overall"), Symbol("CC: Field/ HQ/ Global/ Reserve"), Symbol("CC: Region"), Symbol("CC: Subregion"), Symbol("CC: Country"), Symbol("CF: Cost Center")] .=> x -> convert.(String, x); renamecols=false) |>
@@ -173,9 +245,8 @@ function generate_data(filename::String)
 end
 
 function generate_model(data::Matrix{Tuple{Int8, Float64, Float64}})
-    model = Model(CPLEX.Optimizer; add_bridges = false)
+    model = Model(Gurobi.Optimizer; add_bridges = false)
     set_string_names_on_creation(model, false)
-    set_optimizer_attribute(model, "CPXPARAM_Threads", 4)
     E = axes(data, 1)
     F = axes(data, 2)
     println("adding variables...")
@@ -287,7 +358,7 @@ end
 
 function write_expenses(filename::String, df_expenses::DataFrame)
     println("writing expenses...")
-    XLSX.openxlsx(filename, mode="rw") do xf
+    XLSX.openxlsx("temp/$filename", mode="rw") do xf
         sheet_expenses = xf["expenses"]
         for i in axes(df_expenses, 1)
             sheet_expenses[i + 1, 21] = df_expenses[i, 21]
@@ -309,7 +380,7 @@ end
 
 function write_funds(filename::String, df_funds::DataFrame)
     println("writing funds...")
-    XLSX.openxlsx(filename, mode="rw") do xf
+    XLSX.openxlsx("temp/$filename", mode="rw") do xf
         sheet_funds = xf["funds"]
         for i in axes(df_funds, 1)
             sheet_funds[i + 1, 21] = df_funds[i, 21]
@@ -386,7 +457,7 @@ end
 
 function write_transfers(filename::String, df_transfers::DataFrame)
     println("writing transfers...")
-    XLSX.openxlsx(filename, mode="rw") do xf
+    XLSX.openxlsx("temp/$filename", mode="rw") do xf
         sheet_transfers = xf["transfers"]
         cols_transfers = names(df_transfers)
         sheet_transfers[1, :] = cols_transfers
@@ -398,21 +469,34 @@ function write_transfers(filename::String, df_transfers::DataFrame)
     return
 end
 
-function write_result(filename::String, model::Model)
+function write_excel(filename::String, df_expenses::DataFrame, df_funds::DataFrame, df_transfers::DataFrame)
+    XLSX.writetable(
+        "temp/$filename",
+        "expenses" => df_expenses,
+        "funds" => df_funds,
+        "transfers" => df_transfers
+    )
+    return
+end
+
+function update_file(filename::String)
+    model = solve_model(filename)
     matrix_coef = extract_coef(model)
     matrix_amounts = calculate_amounts(filename, matrix_coef)
     df_expenses = update_expenses(filename, matrix_amounts)
-    write_expenses(filename, df_expenses)
     df_funds = update_funds(filename, matrix_amounts)
-    write_funds(filename, df_funds)
     df_transfers = generate_transfers(df_expenses, df_funds, matrix_amounts)
-    write_transfers(filename, df_transfers)
+    write_excel(filename, df_expenses, df_funds, df_transfers)
+    return
 end
 
 function main(filename::String)
-    model = solve_model(filename)
-    write_result(filename, model)
-    return model
+    download_file(filename)
+    update_file(filename)
+    upload_file(filename)
+    return
 end
+
+main("data_optimization.xlsx")
 
 end
